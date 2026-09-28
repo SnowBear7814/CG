@@ -180,6 +180,20 @@ void Renderer::LoadRocks(const std::wstring& objPath) {
     WaitForGpu();
 }
 
+void Renderer::LoadWater() {
+    WaitForGpu();
+
+    ThrowIfFailed(m_commandAllocators[m_frameIndex]->Reset(), "CommandAllocator Reset failed");
+    ThrowIfFailed(m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), nullptr), "CommandList Reset failed");
+
+    m_renderingSystem.LoadWater(m_device.Get(), m_commandList.Get());
+
+    ThrowIfFailed(m_commandList->Close(), "Close water upload command list failed");
+    ID3D12CommandList* lists[] = {m_commandList.Get()};
+    m_commandQueue->ExecuteCommandLists(1, lists);
+    WaitForGpu();
+}
+
 void Renderer::LoadSkybox(const std::wstring& ddsPath) {
     WaitForGpu();
 

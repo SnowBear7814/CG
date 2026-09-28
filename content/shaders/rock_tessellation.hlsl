@@ -1,5 +1,5 @@
 // Lab 3: tessellation + displacement map + normal map + distance LOD
-// Cracks: no Phong; UV-matched displacement; integer LOD like PCG
+// Cracks: no Phong; UV-matched displacement; integer LOD
 // Lab 8: RT3 ORM (ao / roughness / metallic)
 
 cbuffer ObjectCB : register(b0)
@@ -104,7 +104,7 @@ float TessFactorFromWorldPos(float3 posW)
     return lerp(gMinTess, gMaxTess, t);
 }
 
-// Same factor on all edges (PCG): avoids fractional mismatch; midpoints still used for LOD distance.
+// Same factor on all edges: avoids fractional mismatch; midpoints still used for LOD distance.
 HS_CONSTANTS PatchConstantHS(InputPatch<HsControlPoint, 3> patch)
 {
     HS_CONSTANTS hs;

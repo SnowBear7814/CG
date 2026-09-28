@@ -355,7 +355,7 @@ void Model::Create(
         if (cpuModel.materials[i].normalPath.empty()) {
             gpuMat.hasNormal = false;
         } else {
-            // PCG: *_gl / ddn → flip Y; *_dx → DirectX normals (no flip).
+            // *_gl / ddn → flip Y; *_dx → DirectX normals (no flip).
             std::wstring normLower = cpuModel.materials[i].normalPath;
             for (wchar_t& c : normLower) {
                 if (c >= L'A' && c <= L'Z') {

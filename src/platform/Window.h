@@ -7,7 +7,7 @@
 class Window {
 public:
     using ResizeCallback = std::function<void(UINT width, UINT height)>;
-    // Client-space pixel deltas while LMB/RMB held (PCG-style mouse look).
+    // Client-space pixel deltas while LMB/RMB held (mouse look).
     using MouseLookCallback = std::function<void(float dxPixels, float dyPixels)>;
 
     bool Create(HINSTANCE instance, int width, int height, const std::wstring& title);

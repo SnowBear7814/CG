@@ -23,7 +23,6 @@ void Camera::AddYawPitch(float deltaYaw, float deltaPitch) {
 }
 
 XMVECTOR Camera::ForwardNormalized() const {
-    // PCG ObjTexturesDemoApp::CameraForwardNormalized
     const float cp = std::cos(m_pitch);
     const float sp = std::sin(m_pitch);
     const float cy = std::cos(m_yaw);

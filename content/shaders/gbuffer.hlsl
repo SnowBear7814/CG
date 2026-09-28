@@ -5,6 +5,8 @@
 cbuffer FrameConstants : register(b0)
 {
     float4x4 worldViewProj;
+    float timeSeconds;
+    float3 _padTime;
 };
 
 cbuffer MaterialConstants : register(b1)
@@ -14,8 +16,35 @@ cbuffer MaterialConstants : register(b1)
     float roughness;
     float metallic;
     float ao;
-    float _padMat;
+    float vertexAnimEnable;
+    float vertexAnimPivotY;
+    float vertexAnimAmp;
+    float vertexAnimSpeed;
+    float _padAnim;
 };
+
+// Vertex animation for the sponza_01 flowerbed: squash/stretch along Y around the base.
+float3 ApplyFlowerbedVertexAnim(float3 pos, float enable, float pivotY, float time, float amp, float speed)
+{
+    if (enable < 0.5f)
+    {
+        return pos;
+    }
+    const float scaleY = 1.0f + amp * sin(time * speed);
+    pos.y = pivotY + (pos.y - pivotY) * scaleY;
+    return pos;
+}
+
+float3 ApplyFlowerbedNormalAnim(float3 normal, float enable, float time, float amp, float speed)
+{
+    if (enable < 0.5f)
+    {
+        return normal;
+    }
+    const float scaleY = 1.0f + amp * sin(time * speed);
+    normal.y *= rcp(max(scaleY, 0.2f));
+    return normalize(normal);
+}
 
 struct VSInput
 {
@@ -46,10 +75,13 @@ SamplerState linearSampler : register(s0);
 PSInput VSMain(VSInput input)
 {
     PSInput output;
-    // Sponza is already in world space (identity world), same as PCG wvp path.
-    output.positionH = mul(float4(input.position, 1.0f), worldViewProj);
-    output.positionW = input.position;
-    output.normalW = input.normal;
+    // Sponza is already in world space (identity world matrix).
+    const float3 posW = ApplyFlowerbedVertexAnim(
+        input.position, vertexAnimEnable, vertexAnimPivotY, timeSeconds, vertexAnimAmp, vertexAnimSpeed);
+    output.positionH = mul(float4(posW, 1.0f), worldViewProj);
+    output.positionW = posW;
+    output.normalW = ApplyFlowerbedNormalAnim(
+        input.normal, vertexAnimEnable, timeSeconds, vertexAnimAmp, vertexAnimSpeed);
     output.uv = input.uv * uvScale + uvOffset;
     return output;
 }

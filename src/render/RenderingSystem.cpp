@@ -6,6 +6,7 @@
 #include <d3dcompiler.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <stdexcept>
 
@@ -13,6 +14,9 @@ using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 
 namespace {
+constexpr float kFlowerbedAnimAmp = 0.18f;
+constexpr float kFlowerbedAnimSpeed = 2.2f;
+
 ComPtr<ID3DBlob> CompileShader(const std::wstring& path, const char* entry, const char* target) {
     UINT flags = 0;
 #if defined(_DEBUG)
@@ -74,6 +78,62 @@ XMMATRIX ComposeWorldOnFloor(
     const float liftY = anchorOnFloor.y - minY;
     return scaleRot * XMMatrixTranslation(anchorOnFloor.x, liftY, anchorOnFloor.z);
 }
+
+CpuModel MakeWaterPlane(int quads, float size) {
+    CpuModel model;
+    MaterialDesc mat{};
+    mat.name = "water";
+    mat.roughness = 0.12f;
+    mat.metallic = 0.05f;
+    mat.ao = 1.0f;
+    model.materials.push_back(mat);
+
+    const int vertsPerSide = quads + 1;
+    model.vertices.reserve(static_cast<size_t>(vertsPerSide * vertsPerSide));
+    const float half = size * 0.5f;
+    for (int z = 0; z < vertsPerSide; ++z) {
+        const float tz = static_cast<float>(z) / static_cast<float>(quads);
+        const float pz = -half + tz * size;
+        for (int x = 0; x < vertsPerSide; ++x) {
+            const float tx = static_cast<float>(x) / static_cast<float>(quads);
+            const float px = -half + tx * size;
+            Vertex v{};
+            v.position = {px, 0.0f, pz};
+            v.normal = {0.0f, 1.0f, 0.0f};
+            v.uv = {tx * 4.0f, tz * 4.0f};
+            v.tangent = {1.0f, 0.0f, 0.0f, 1.0f};
+            model.vertices.push_back(v);
+        }
+    }
+
+    model.indices.reserve(static_cast<size_t>(quads * quads * 6));
+    for (int z = 0; z < quads; ++z) {
+        for (int x = 0; x < quads; ++x) {
+            const uint32_t i0 = static_cast<uint32_t>(z * vertsPerSide + x);
+            const uint32_t i1 = i0 + 1;
+            const uint32_t i2 = i0 + static_cast<uint32_t>(vertsPerSide);
+            const uint32_t i3 = i2 + 1;
+            model.indices.push_back(i0);
+            model.indices.push_back(i2);
+            model.indices.push_back(i1);
+            model.indices.push_back(i1);
+            model.indices.push_back(i2);
+            model.indices.push_back(i3);
+        }
+    }
+
+    SubMeshDesc sm{};
+    sm.indexStart = 0;
+    sm.indexCount = static_cast<uint32_t>(model.indices.size());
+    sm.materialIndex = 0;
+    sm.objectName = "water_plane";
+    model.submeshes.push_back(sm);
+
+    model.boundsMin = {-half, 0.0f, -half};
+    model.boundsMax = {half, 0.0f, half};
+    ComputeTangents(model);
+    return model;
+}
 } // namespace
 
 void RenderingSystem::Initialize(ID3D12Device* device, UINT width, UINT height) {
@@ -98,6 +158,7 @@ void RenderingSystem::Initialize(ID3D12Device* device, UINT width, UINT height) 
     CreateConstantBuffers(device);
     CreateGeometryPipeline(device);
     CreateRockTessPipeline(device);
+    CreateWaterTessPipeline(device);
     CreateShadowPipeline(device);
     CreateLightingPipeline(device);
     UpdateLightingSrvHeap(device);
@@ -112,6 +173,10 @@ void RenderingSystem::Shutdown() {
         m_rockCb->Unmap(0, nullptr);
         m_mappedRockCbBytes = nullptr;
     }
+    if (m_mappedWaterCbBytes) {
+        m_waterCb->Unmap(0, nullptr);
+        m_mappedWaterCbBytes = nullptr;
+    }
     if (m_mappedLightingCbBytes) {
         m_lightingCb->Unmap(0, nullptr);
         m_mappedLightingCbBytes = nullptr;
@@ -125,6 +190,7 @@ void RenderingSystem::Shutdown() {
     m_octreeItems.clear();
     m_octree.Clear();
     m_rockModel.Shutdown();
+    m_waterModel.Shutdown();
     m_model.Shutdown();
     m_particles.Shutdown();
     m_post.Shutdown();
@@ -134,16 +200,22 @@ void RenderingSystem::Shutdown() {
     m_skyboxUpload.Reset();
     m_skyboxLoaded = false;
     m_lights.clear();
+    m_flyingLights.clear();
+    m_sceneLightCount = 0;
+    m_shotColorIndex = 0;
     m_nextSrvIndex = 0;
 
     m_geometryCb.Reset();
     m_rockCb.Reset();
+    m_waterCb.Reset();
     m_lightingCb.Reset();
     m_shadowCb.Reset();
     m_geometryPso.Reset();
     m_geometryRootSignature.Reset();
     m_rockTessPso.Reset();
     m_rockRootSignature.Reset();
+    m_waterTessPso.Reset();
+    m_waterRootSignature.Reset();
     m_shadowPso.Reset();
     m_shadowAlphaPso.Reset();
     m_shadowRootSignature.Reset();
@@ -188,6 +260,23 @@ void RenderingSystem::LoadModel(
         m_srvDescriptorSize,
         m_nextSrvIndex);
     m_nextSrvIndex += m_model.GetMaterialSrvCount();
+
+    m_flowerbedPivotY = 0.0f;
+    float flowerbedMinY = FLT_MAX;
+    bool foundFlowerbed = false;
+    for (const auto& submesh : cpuModel.submeshes) {
+        if (submesh.objectName != "sponza_01") {
+            continue;
+        }
+        foundFlowerbed = true;
+        for (uint32_t i = 0; i < submesh.indexCount; ++i) {
+            const uint32_t vi = cpuModel.indices[submesh.indexStart + i];
+            flowerbedMinY = (std::min)(flowerbedMinY, cpuModel.vertices[vi].position.y);
+        }
+    }
+    if (foundFlowerbed) {
+        m_flowerbedPivotY = flowerbedMinY;
+    }
 
     SetupLightsForScene(cpuModel.boundsMin, cpuModel.boundsMax);
 
@@ -242,6 +331,29 @@ void RenderingSystem::LoadRocks(
     BuildRockInstances();
 }
 
+void RenderingSystem::LoadWater(
+    ID3D12Device* device,
+    ID3D12GraphicsCommandList* commandList) {
+    m_waterModel.Shutdown();
+
+    CpuModel cpuModel = MakeWaterPlane(16, 160.0f);
+    const UINT needed = m_nextSrvIndex + static_cast<UINT>(cpuModel.materials.size()) * kTexturesPerMaterial;
+    if (needed > kMaxMaterialSrvs) {
+        throw std::runtime_error("Water materials exceed SRV heap");
+    }
+
+    m_waterModel.Create(
+        device,
+        commandList,
+        cpuModel,
+        m_materialSrvHeap.Get(),
+        m_srvDescriptorSize,
+        m_nextSrvIndex);
+    m_nextSrvIndex += m_waterModel.GetMaterialSrvCount();
+
+    XMStoreFloat4x4(&m_waterWorld, XMMatrixTranslation(800.0f, 200.0f, 0.0f));
+}
+
 void RenderingSystem::LoadSkybox(
     ID3D12Device* device,
     ID3D12GraphicsCommandList* commandList,
@@ -280,7 +392,7 @@ void RenderingSystem::BuildRockInstances() {
         sMax.z - sMin.z);
 
     constexpr float kRockClearanceAboveSponzaTop = 14.0f;
-    // Same sizing as PCG-main ObjTexturesDemoApp_SceneLoader.
+    // Scale rocks relative to Sponza extent so they stay readable in the courtyard.
     const float rockTarget = (std::max)(4.0f, sponzaExtent * 0.04f);
     const float rockScale = (rockExtent > 1e-5f) ? (rockTarget / rockExtent) : 1.0f;
     const float instanceSpacing = (std::max)(rockTarget * 1.08f, 10.0f);
@@ -289,7 +401,7 @@ void RenderingSystem::BuildRockInstances() {
     const float courtyardX = 0.5f * (sMin.x + sMax.x);
     const float courtyardZ = 0.5f * (sMin.z + sMax.z);
 
-    // PCG Draw: DispScale = 0.045 in local space (world matrix scales it).
+    // Displacement scale is in local space; the world matrix scales it.
     m_rockDispScale = 0.045f;
     m_rockMinTess = 1.0f;
     m_rockMaxTess = 5.0f;
@@ -332,10 +444,58 @@ void RenderingSystem::BuildRockOctree() {
     m_octree.Build(m_octreeItems);
 }
 
+void RenderingSystem::QueryFrustumVisibleRocks(std::vector<uint32_t>& outVisible) const {
+    outVisible.clear();
+    const uint32_t count = static_cast<uint32_t>(m_rockInstances.size());
+    if (count == 0) {
+        return;
+    }
+
+    if (m_octreeCullingEnabled) {
+        m_octree.QueryFrustum(m_frustum, m_octreeItems, count, outVisible);
+        return;
+    }
+
+    outVisible.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        if (m_frustum.IntersectsAabb(m_rockInstances[i].worldBounds)) {
+            outVisible.push_back(i);
+        }
+    }
+}
+
+void RenderingSystem::ToggleFrustumLock() {
+    if (m_frustumLockEnabled) {
+        m_frustumLockEnabled = false;
+        m_pendingFrustumLock = false;
+        m_lockedVisibleRocks.clear();
+        m_lockedRockMask.clear();
+        return;
+    }
+    m_pendingFrustumLock = true;
+}
+
 void RenderingSystem::CollectVisibleRocks(std::vector<uint32_t>& outVisible) {
     outVisible.clear();
     const uint32_t count = static_cast<uint32_t>(m_rockInstances.size());
     if (count == 0) {
+        return;
+    }
+
+    if (m_pendingFrustumLock) {
+        QueryFrustumVisibleRocks(m_lockedVisibleRocks);
+        m_lockedRockMask.assign(count, 0);
+        for (uint32_t idx : m_lockedVisibleRocks) {
+            if (idx < count) {
+                m_lockedRockMask[idx] = 1;
+            }
+        }
+        m_frustumLockEnabled = true;
+        m_pendingFrustumLock = false;
+    }
+
+    if (m_frustumLockEnabled) {
+        outVisible = m_lockedVisibleRocks;
         return;
     }
 
@@ -347,18 +507,7 @@ void RenderingSystem::CollectVisibleRocks(std::vector<uint32_t>& outVisible) {
         return;
     }
 
-    if (m_octreeCullingEnabled) {
-        m_octree.QueryFrustum(m_frustum, m_octreeItems, count, outVisible);
-        return;
-    }
-
-    outVisible.reserve(count);
-    for (uint32_t i = 0; i < count; ++i) {
-        const Aabb& b = m_rockInstances[i].worldBounds;
-        if (m_frustum.IntersectsAabb(b)) {
-            outVisible.push_back(i);
-        }
-    }
+    QueryFrustumVisibleRocks(outVisible);
 }
 
 void RenderingSystem::SetupLightsForScene(
@@ -400,6 +549,93 @@ void RenderingSystem::SetupLightsForScene(
         light.range = 1200.0f;
         m_lights.push_back(light);
     }
+
+    m_sceneLightCount = static_cast<UINT>(m_lights.size());
+    ComposeLights();
+}
+
+void RenderingSystem::ComposeLights() {
+    if (m_lights.size() > m_sceneLightCount) {
+        m_lights.resize(m_sceneLightCount);
+    }
+    for (const FlyingLight& shot : m_flyingLights) {
+        if (m_lights.size() >= kMaxLights) {
+            break;
+        }
+        GpuLight light{};
+        light.type = static_cast<uint32_t>(LightType::Point);
+        light.position = shot.position;
+        light.color = shot.color;
+        light.intensity = shot.intensity;
+        light.range = shot.range;
+        m_lights.push_back(light);
+    }
+}
+
+void RenderingSystem::ShootLight(XMFLOAT3 origin, XMFLOAT3 direction) {
+    const XMVECTOR dir = XMVector3Normalize(XMLoadFloat3(&direction));
+    if (XMVectorGetX(XMVector3LengthSq(dir)) < 1e-8f) {
+        return;
+    }
+
+    const UINT shotSlots = kMaxLights - m_sceneLightCount;
+    if (shotSlots == 0) {
+        return;
+    }
+    if (m_flyingLights.size() >= shotSlots) {
+        m_flyingLights.erase(m_flyingLights.begin());
+    }
+
+    static const XMFLOAT3 kShotColors[] = {
+        {1.00f, 0.35f, 0.20f},
+        {0.25f, 0.75f, 1.00f},
+        {1.00f, 0.90f, 0.25f},
+        {0.85f, 0.35f, 1.00f},
+        {0.30f, 1.00f, 0.45f},
+        {1.00f, 1.00f, 1.00f},
+    };
+
+    constexpr float kSpawnOffset = 18.0f;
+    constexpr float kSpeed = 520.0f;
+
+    const XMVECTOR originV = XMLoadFloat3(&origin) + dir * kSpawnOffset;
+    FlyingLight shot{};
+    XMStoreFloat3(&shot.position, originV);
+    XMStoreFloat3(&shot.velocity, dir * kSpeed);
+    shot.color = kShotColors[m_shotColorIndex % 6];
+    ++m_shotColorIndex;
+    shot.intensity = 42.0f;
+    shot.range = 520.0f;
+    shot.age = 0.0f;
+    m_flyingLights.push_back(shot);
+    ComposeLights();
+}
+
+void RenderingSystem::UpdateShotLights(float deltaSeconds) {
+    if (m_flyingLights.empty() || deltaSeconds <= 0.0f) {
+        ComposeLights();
+        return;
+    }
+
+    constexpr float kMaxAge = 25.0f;
+    size_t write = 0;
+    for (size_t i = 0; i < m_flyingLights.size(); ++i) {
+        FlyingLight shot = m_flyingLights[i];
+        shot.age += deltaSeconds;
+        shot.position.x += shot.velocity.x * deltaSeconds;
+        shot.position.y += shot.velocity.y * deltaSeconds;
+        shot.position.z += shot.velocity.z * deltaSeconds;
+        if (shot.age < kMaxAge) {
+            m_flyingLights[write++] = shot;
+        }
+    }
+    m_flyingLights.resize(write);
+    ComposeLights();
+}
+
+void RenderingSystem::ClearShotLights() {
+    m_flyingLights.clear();
+    ComposeLights();
 }
 
 void RenderingSystem::Render(
@@ -416,6 +652,7 @@ void RenderingSystem::Render(
     }
 
     m_frameIndex = frameIndex % kFrameBuffers;
+    UpdateShotLights(deltaSeconds);
 
     const UINT gbWidth = m_gbuffer.GetWidth();
     const UINT gbHeight = m_gbuffer.GetHeight();
@@ -427,11 +664,13 @@ void RenderingSystem::Render(
     const XMMATRIX view = camera.GetViewMatrix();
     const XMMATRIX proj = camera.GetProjectionMatrix(aspect);
     const XMMATRIX viewProj = view * proj;
-    XMStoreFloat4x4(&GeometryCbForFrame()->worldViewProj, XMMatrixTranspose(viewProj));
+    GeometryCB* geometryCb = GeometryCbForFrame();
+    XMStoreFloat4x4(&geometryCb->worldViewProj, XMMatrixTranspose(viewProj));
+    geometryCb->timeSeconds = timeSeconds;
 
     // Lab 5: cascaded shadow maps (before G-buffer so depth array is ready for lighting)
     if (m_shadowsEnabled && m_shadowMaps.IsValid()) {
-        RenderShadowMaps(commandList, camera, aspect);
+        RenderShadowMaps(commandList, camera, aspect, timeSeconds);
     }
 
     D3D12_VIEWPORT screenViewport{};
@@ -470,7 +709,7 @@ void RenderingSystem::Render(
     const auto& materials = m_model.GetMaterials();
     for (const auto& submesh : m_model.GetSubmeshes()) {
         const GpuMaterial& mat = materials[submesh.materialIndex];
-        float matParams[8] = {
+        float matParams[12] = {
             1.0f,
             1.0f,
             0.0f,
@@ -478,6 +717,10 @@ void RenderingSystem::Render(
             mat.roughness,
             mat.metallic,
             mat.ao,
+            0.0f,
+            0.0f,
+            0.0f,
+            1.0f,
             0.0f};
         if (submesh.objectName == "sponza_320") {
             matParams[0] = kAnimTiling;
@@ -485,8 +728,14 @@ void RenderingSystem::Render(
             matParams[2] = timeSeconds * kScrollU;
             matParams[3] = timeSeconds * kScrollV;
         }
+        if (submesh.objectName == "sponza_01") {
+            matParams[7] = 1.0f;
+            matParams[8] = m_flowerbedPivotY;
+            matParams[9] = kFlowerbedAnimAmp;
+            matParams[10] = kFlowerbedAnimSpeed;
+        }
 
-        commandList->SetGraphicsRoot32BitConstants(1, 8, matParams, 0);
+        commandList->SetGraphicsRoot32BitConstants(1, 12, matParams, 0);
         commandList->SetGraphicsRootDescriptorTable(2, mat.srvGpu);
         commandList->DrawIndexedInstanced(submesh.indexCount, 1, submesh.indexStart, 0, 0);
     }
@@ -597,6 +846,47 @@ void RenderingSystem::Render(
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList->DrawInstanced(3, 1, 0, 0);
 
+    // Lab 3 bonus: transparent water after lighting (alpha blend, depth test, no depth write)
+    if (m_waterModel.IsValid() && m_waterTessPso && m_mappedWaterCbBytes) {
+        const D3D12_CPU_DESCRIPTOR_HANDLE waterDsv = m_gbuffer.GetDsvCpu();
+        commandList->OMSetRenderTargets(1, &sceneRtv, FALSE, &waterDsv);
+        commandList->RSSetViewports(1, &screenViewport);
+        commandList->RSSetScissorRects(1, &screenScissor);
+
+        commandList->SetPipelineState(m_waterTessPso.Get());
+        commandList->SetGraphicsRootSignature(m_waterRootSignature.Get());
+        commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+
+        const D3D12_VERTEX_BUFFER_VIEW waterVbv = m_waterModel.GetVertexBufferView();
+        const D3D12_INDEX_BUFFER_VIEW waterIbv = m_waterModel.GetIndexBufferView();
+        commandList->IASetVertexBuffers(0, 1, &waterVbv);
+        commandList->IASetIndexBuffer(&waterIbv);
+
+        const XMMATRIX world = XMLoadFloat4x4(&m_waterWorld);
+        const XMMATRIX worldInvTranspose = XMMatrixTranspose(XMMatrixInverse(nullptr, world));
+        const XMMATRIX wvp = world * viewProj;
+
+        WaterCB* waterCb = WaterCbForFrame();
+        XMStoreFloat4x4(&waterCb->world, XMMatrixTranspose(world));
+        XMStoreFloat4x4(&waterCb->worldInvTranspose, XMMatrixTranspose(worldInvTranspose));
+        XMStoreFloat4x4(&waterCb->worldViewProj, XMMatrixTranspose(wvp));
+        waterCb->eyePosW = camera.GetPosition();
+        waterCb->time = timeSeconds;
+        waterCb->minTess = 6.0f;
+        waterCb->maxTess = 24.0f;
+        waterCb->tessNear = 80.0f;
+        waterCb->tessFar = 900.0f;
+        waterCb->waveAmp = 2.4f;
+        waterCb->waveFreq = 0.085f;
+        waterCb->waveSpeed = 1.6f;
+        waterCb->pad = 0.0f;
+        commandList->SetGraphicsRootConstantBufferView(0, WaterCbGpu());
+
+        for (const auto& submesh : m_waterModel.GetSubmeshes()) {
+            commandList->DrawIndexedInstanced(submesh.indexCount, 1, submesh.indexStart, 0, 0);
+        }
+    }
+
     // Lab 6: opaque GPU particles (CS Append/Consume + GS billboards)
     if (m_particles.IsValid() && m_particles.IsEnabled()) {
         const XMVECTOR camRight = camera.RightNormalized();
@@ -660,6 +950,7 @@ void RenderingSystem::CreateConstantBuffers(ID3D12Device* device) {
     m_geometryCbStride = AlignUp(static_cast<UINT>(sizeof(GeometryCB)), 256);
     m_lightingCbStride = AlignUp(static_cast<UINT>(sizeof(LightingCB)), 256);
     m_rockCbStride = AlignUp(static_cast<UINT>(sizeof(RockObjectCB)), 256);
+    m_waterCbStride = AlignUp(static_cast<UINT>(sizeof(WaterCB)), 256);
     m_shadowCbStride = AlignUp(static_cast<UINT>(sizeof(ShadowCB)), 256);
 
     m_rockSlotsPerFrame = static_cast<UINT>(kRockGridX * kRockGridZ) * 4u;
@@ -678,6 +969,10 @@ void RenderingSystem::CreateConstantBuffers(ID3D12Device* device) {
         static_cast<UINT64>(m_rockCbStride) * m_rockSlotsPerFrame * kFrameBuffers,
         m_rockCb,
         reinterpret_cast<void**>(&m_mappedRockCbBytes));
+    createUpload(
+        static_cast<UINT64>(m_waterCbStride) * kFrameBuffers,
+        m_waterCb,
+        reinterpret_cast<void**>(&m_mappedWaterCbBytes));
     createUpload(
         static_cast<UINT64>(m_shadowCbStride) * m_shadowSlotsPerFrame * kFrameBuffers,
         m_shadowCb,
@@ -717,6 +1012,15 @@ D3D12_GPU_VIRTUAL_ADDRESS RenderingSystem::RockCbGpu(UINT slotInFrame) {
         (static_cast<UINT64>(m_frameIndex) * m_rockSlotsPerFrame + slotInFrame) * m_rockCbStride;
 }
 
+RenderingSystem::WaterCB* RenderingSystem::WaterCbForFrame() {
+    return reinterpret_cast<WaterCB*>(m_mappedWaterCbBytes + m_frameIndex * m_waterCbStride);
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS RenderingSystem::WaterCbGpu() {
+    return m_waterCb->GetGPUVirtualAddress() +
+        static_cast<UINT64>(m_frameIndex) * m_waterCbStride;
+}
+
 D3D12_GPU_VIRTUAL_ADDRESS RenderingSystem::ShadowCbGpu(UINT slotInFrame) {
     return m_shadowCb->GetGPUVirtualAddress() +
         (static_cast<UINT64>(m_frameIndex) * m_shadowSlotsPerFrame + slotInFrame) * m_shadowCbStride;
@@ -736,7 +1040,7 @@ void RenderingSystem::CreateGeometryPipeline(ID3D12Device* device) {
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     params[1].Constants.ShaderRegister = 1;
-    params[1].Constants.Num32BitValues = 8;
+    params[1].Constants.Num32BitValues = 12;
 
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -872,7 +1176,7 @@ void RenderingSystem::CreateRockTessPipeline(ID3D12Device* device) {
     pso.BlendState.RenderTarget[3].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     pso.SampleMask = UINT_MAX;
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // PCG: double-sided rocks (fewer holes after disp)
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // Double-sided rocks: fewer holes after displacement
     pso.RasterizerState.DepthClipEnable = TRUE;
     pso.DepthStencilState.DepthEnable = TRUE;
     pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
@@ -888,6 +1192,74 @@ void RenderingSystem::CreateRockTessPipeline(ID3D12Device* device) {
     pso.SampleDesc.Count = 1;
 
     ThrowIfFailed(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_rockTessPso)), "Rock tess PSO failed");
+}
+
+void RenderingSystem::CreateWaterTessPipeline(ID3D12Device* device) {
+    D3D12_ROOT_PARAMETER params[1]{};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[0].Descriptor.ShaderRegister = 0;
+
+    D3D12_ROOT_SIGNATURE_DESC rootDesc{};
+    rootDesc.NumParameters = 1;
+    rootDesc.pParameters = params;
+    rootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    ThrowIfFailed(
+        D3D12SerializeRootSignature(&rootDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error),
+        "Water root sig serialize failed");
+    ThrowIfFailed(
+        device->CreateRootSignature(
+            0,
+            signature->GetBufferPointer(),
+            signature->GetBufferSize(),
+            IID_PPV_ARGS(&m_waterRootSignature)),
+        "Water root sig create failed");
+
+    const std::wstring shaderPath = std::wstring(CONTENT_DIR) + L"/shaders/water_tessellation.hlsl";
+    ComPtr<ID3DBlob> vs = CompileShader(shaderPath, "VSMain", "vs_5_1");
+    ComPtr<ID3DBlob> hs = CompileShader(shaderPath, "HSMain", "hs_5_1");
+    ComPtr<ID3DBlob> ds = CompileShader(shaderPath, "DSMain", "ds_5_1");
+    ComPtr<ID3DBlob> ps = CompileShader(shaderPath, "PSMain", "ps_5_1");
+
+    D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.pRootSignature = m_waterRootSignature.Get();
+    pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    pso.HS = {hs->GetBufferPointer(), hs->GetBufferSize()};
+    pso.DS = {ds->GetBufferPointer(), ds->GetBufferSize()};
+    pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    pso.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    pso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.SampleMask = UINT_MAX;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.DepthStencilState.DepthEnable = TRUE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    pso.InputLayout = {inputLayout, _countof(inputLayout)};
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pso.SampleDesc.Count = 1;
+
+    ThrowIfFailed(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_waterTessPso)), "Water tess PSO failed");
 }
 
 void RenderingSystem::CreateShadowPipeline(ID3D12Device* device) {
@@ -1107,7 +1479,8 @@ XMFLOAT3 RenderingSystem::FindDirectionalLightDirection() const {
 void RenderingSystem::RenderShadowMaps(
     ID3D12GraphicsCommandList* commandList,
     const Camera& camera,
-    float aspect) {
+    float aspect,
+    float timeSeconds) {
     if (!m_shadowMaps.IsValid() || !m_mappedShadowCbBytes) {
         return;
     }
@@ -1162,7 +1535,9 @@ void RenderingSystem::RenderShadowMaps(
                               UINT startIndex,
                               UINT cascade,
                               bool alphaCutout,
-                              D3D12_GPU_DESCRIPTOR_HANDLE diffuseSrv) {
+                              D3D12_GPU_DESCRIPTOR_HANDLE diffuseSrv,
+                              float vertexAnimEnable = 0.0f,
+                              float vertexAnimPivotY = 0.0f) {
         if (shadowSlot >= m_shadowSlotsPerFrame || indexCount == 0) {
             return;
         }
@@ -1177,6 +1552,11 @@ void RenderingSystem::RenderShadowMaps(
         XMStoreFloat4x4(&cb.worldLightViewProj, XMMatrixTranspose(world * lightVp));
         cb.alphaTestEnable = alphaCutout ? 1.0f : 0.0f;
         cb.alphaTestCutoff = 0.2f;
+        cb.vertexAnimEnable = vertexAnimEnable;
+        cb.vertexAnimPivotY = vertexAnimPivotY;
+        cb.vertexAnimTime = timeSeconds;
+        cb.vertexAnimAmp = kFlowerbedAnimAmp;
+        cb.vertexAnimSpeed = kFlowerbedAnimSpeed;
         *reinterpret_cast<ShadowCB*>(shadowCbBase + shadowSlot * m_shadowCbStride) = cb;
         commandList->SetGraphicsRootConstantBufferView(0, ShadowCbGpu(shadowSlot));
         if (alphaCutout) {
@@ -1207,6 +1587,7 @@ void RenderingSystem::RenderShadowMaps(
 
         for (const auto& submesh : sponzaSubmeshes) {
             const GpuMaterial& mat = sponzaMaterials[submesh.materialIndex];
+            const bool isFlowerbed = submesh.objectName == "sponza_01";
             pushShadowDraw(
                 XMMatrixIdentity(),
                 sponzaVbv,
@@ -1215,11 +1596,18 @@ void RenderingSystem::RenderShadowMaps(
                 submesh.indexStart,
                 cascade,
                 mat.alphaCutout,
-                mat.srvGpu);
+                mat.srvGpu,
+                isFlowerbed ? 1.0f : 0.0f,
+                isFlowerbed ? m_flowerbedPivotY : 0.0f);
         }
 
         if (m_rockModel.IsValid() && rockIndexCount > 0) {
-            for (const auto& inst : m_rockInstances) {
+            for (uint32_t instIdx = 0; instIdx < static_cast<uint32_t>(m_rockInstances.size()); ++instIdx) {
+                if (m_frustumLockEnabled &&
+                    (instIdx >= m_lockedRockMask.size() || !m_lockedRockMask[instIdx])) {
+                    continue;
+                }
+                const RockInstance& inst = m_rockInstances[instIdx];
                 if (!lightFrustum.IntersectsAabb(inst.worldBounds)) {
                     continue;
                 }

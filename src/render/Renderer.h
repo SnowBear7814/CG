@@ -19,6 +19,7 @@ public:
     void Resize(UINT width, UINT height);
     void LoadModel(const std::wstring& objPath);
     void LoadRocks(const std::wstring& objPath);
+    void LoadWater();
     void LoadSkybox(const std::wstring& ddsPath);
     void DrawFrame(const Camera& camera, float timeSeconds, float deltaSeconds);
 
@@ -33,6 +34,9 @@ public:
     void ToggleFrustumCulling() { m_renderingSystem.ToggleFrustumCulling(); }
     bool IsOctreeCullingEnabled() const { return m_renderingSystem.IsOctreeCullingEnabled(); }
     void ToggleOctreeCulling() { m_renderingSystem.ToggleOctreeCulling(); }
+    void ToggleFrustumLock() { m_renderingSystem.ToggleFrustumLock(); }
+    bool IsFrustumLockEnabled() const { return m_renderingSystem.IsFrustumLockEnabled(); }
+    UINT GetLockedRockCount() const { return m_renderingSystem.GetLockedRockCount(); }
     UINT GetOctreeNodeCount() const { return m_renderingSystem.GetOctreeNodeCount(); }
     void ToggleShadows() { m_renderingSystem.ToggleShadows(); }
     bool AreShadowsEnabled() const { return m_renderingSystem.AreShadowsEnabled(); }
@@ -45,6 +49,13 @@ public:
     bool IsChromaticAberrationEnabled() const { return m_renderingSystem.IsChromaticAberrationEnabled(); }
     void TogglePbr() { m_renderingSystem.TogglePbr(); }
     bool IsPbrEnabled() const { return m_renderingSystem.IsPbrEnabled(); }
+
+    void ShootLight(DirectX::XMFLOAT3 origin, DirectX::XMFLOAT3 direction) {
+        m_renderingSystem.ShootLight(origin, direction);
+    }
+    void UpdateShotLights(float deltaSeconds) { m_renderingSystem.UpdateShotLights(deltaSeconds); }
+    void ClearShotLights() { m_renderingSystem.ClearShotLights(); }
+    UINT GetShotLightCount() const { return m_renderingSystem.GetShotLightCount(); }
 
     ID3D12Device* GetDevice() const { return m_device.Get(); }
 

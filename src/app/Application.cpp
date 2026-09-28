@@ -34,7 +34,7 @@ int Application::Run(HINSTANCE instance) {
         m_renderer.Resize(width, height);
     });
 
-    // PCG-style mouse look: hold LMB/RMB, yaw += dx, pitch -= dy
+    // Mouse look: hold LMB/RMB, yaw += dx, pitch -= dy
     m_window.SetMouseLookCallback([this](float dxPixels, float dyPixels) {
         m_camera.AddYawPitch(
             m_camera.mouseSensitivity * dxPixels,
@@ -55,6 +55,7 @@ int Application::Run(HINSTANCE instance) {
     const std::wstring skyboxPath = std::wstring(CONTENT_DIR) + L"/skybox/skybox.dds";
     m_renderer.LoadModel(sponzaPath);
     m_renderer.LoadRocks(rockPath);
+    m_renderer.LoadWater();
     m_renderer.LoadSkybox(skyboxPath);
     SetupCameraForModel();
 
@@ -84,7 +85,7 @@ int Application::Run(HINSTANCE instance) {
 }
 
 void Application::SetupCameraForModel() {
-    // PCG FitCameraToScene: stand south of courtyard, look +Z into the scene.
+    // Place the camera south of the courtyard, looking +Z into the scene.
     const auto bmin = m_renderer.GetModelBoundsMin();
     const auto bmax = m_renderer.GetModelBoundsMax();
     const float cx = 0.5f * (bmin.x + bmax.x);
@@ -118,6 +119,12 @@ void Application::Update(float deltaSeconds) {
     }
     m_prevF3 = f3Down;
 
+    const bool f2Down = m_keys[VK_F2];
+    if (f2Down && !m_prevF2) {
+        m_renderer.ToggleFrustumLock();
+    }
+    m_prevF2 = f2Down;
+
     const bool f4Down = m_keys[VK_F4];
     if (f4Down && !m_prevF4) {
         m_renderer.ToggleShadows();
@@ -148,7 +155,22 @@ void Application::Update(float deltaSeconds) {
     }
     m_prevF9 = f9Down;
 
-    // PCG movement: W/S along look, A/D along right, Space/Ctrl up/down, Shift boost
+    const bool gDown = m_keys['G'];
+    if (gDown && !m_prevG) {
+        DirectX::XMFLOAT3 origin = m_camera.GetPosition();
+        DirectX::XMFLOAT3 direction{};
+        DirectX::XMStoreFloat3(&direction, m_camera.ForwardNormalized());
+        m_renderer.ShootLight(origin, direction);
+    }
+    m_prevG = gDown;
+
+    const bool cDown = m_keys['C'];
+    if (cDown && !m_prevC) {
+        m_renderer.ClearShotLights();
+    }
+    m_prevC = cDown;
+
+    // W/S along look, A/D along right, Space/Ctrl up/down, Shift boost
     float forward = 0.0f;
     float right = 0.0f;
     float up = 0.0f;
@@ -201,6 +223,9 @@ void Application::UpdateTitle() {
                   ? (m_renderer.IsOctreeCullingEnabled() ? L"octree" : L"linear")
                   : L"off")
           << L" (F3)"
+          << L" | lock "
+          << (m_renderer.IsFrustumLockEnabled() ? L"ON" : L"OFF")
+          << L" (F2)"
           << L" | shadow " << (m_renderer.AreShadowsEnabled() ? L"ON" : L"OFF")
           << L" (F4)"
           << L" | particles " << (m_renderer.AreParticlesEnabled() ? L"ON" : L"OFF")
@@ -211,6 +236,8 @@ void Application::UpdateTitle() {
           << L" (F8)"
           << L" | PBR " << (m_renderer.IsPbrEnabled() ? L"ON" : L"OFF")
           << L" (F9)"
+          << L" | shot lights " << m_renderer.GetShotLightCount()
+          << L" (G/C)"
           << L" | pos (" << pos.x << L", " << pos.y << L", " << pos.z << L")";
     m_window.SetTitle(title.str());
 }

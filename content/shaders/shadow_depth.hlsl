@@ -4,8 +4,24 @@ cbuffer ShadowCB : register(b0)
     float4x4 gWorldLightViewProj;
     float gAlphaTestEnable;
     float gAlphaTestCutoff;
-    float2 _pad;
+    float gVertexAnimEnable;
+    float gVertexAnimPivotY;
+    float gVertexAnimTime;
+    float gVertexAnimAmp;
+    float gVertexAnimSpeed;
+    float _padAnim;
 };
+
+float3 ApplyFlowerbedVertexAnim(float3 pos, float enable, float pivotY, float time, float amp, float speed)
+{
+    if (enable < 0.5f)
+    {
+        return pos;
+    }
+    const float scaleY = 1.0f + amp * sin(time * speed);
+    pos.y = pivotY + (pos.y - pivotY) * scaleY;
+    return pos;
+}
 
 Texture2D gDiffuseMap : register(t0);
 SamplerState gSamLinearWrap : register(s0);
@@ -26,7 +42,14 @@ struct VSOutput
 VSOutput VSMain(VSInput input)
 {
     VSOutput o;
-    o.positionH = mul(float4(input.position, 1.0f), gWorldLightViewProj);
+    const float3 pos = ApplyFlowerbedVertexAnim(
+        input.position,
+        gVertexAnimEnable,
+        gVertexAnimPivotY,
+        gVertexAnimTime,
+        gVertexAnimAmp,
+        gVertexAnimSpeed);
+    o.positionH = mul(float4(pos, 1.0f), gWorldLightViewProj);
     o.uv = input.uv;
     return o;
 }

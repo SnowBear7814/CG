@@ -108,7 +108,7 @@ bool LoadDdsTexture(
         *outIsCubemap = isCubemap;
     }
 
-    // Match PCG importer: create in COMMON, then barrier to COPY_DEST before upload.
+    // Create in COMMON, then barrier to COPY_DEST before upload.
     D3D12_RESOURCE_DESC texDesc{};
     texDesc.Dimension = (metadata.dimension == TEX_DIMENSION_TEXTURE3D)
         ? D3D12_RESOURCE_DIMENSION_TEXTURE3D

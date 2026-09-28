@@ -4,3 +4,4 @@ out/
 *.user
 *.suo
 CMakeUserPresets.json
+docs/

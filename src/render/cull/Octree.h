@@ -12,7 +12,7 @@ struct OctreeItem {
     Aabb Bounds{};
 };
 
-// Spatial octree for Lab 4 frustum queries (PCG-main Octree port).
+// Spatial octree for Lab 4 frustum queries.
 class Octree {
 public:
     void Build(const std::vector<OctreeItem>& items);

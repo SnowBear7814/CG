@@ -39,7 +39,7 @@ struct Aabb {
     }
 };
 
-// View-frustum vs world AABB (Lab 4). Clip-space test matches PCG-main Frustum.
+// View-frustum vs world AABB (Lab 4). Clip-space AABB test.
 struct Frustum {
     DirectX::XMFLOAT4X4 viewProj{};
 

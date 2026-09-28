@@ -39,6 +39,10 @@ public:
         ID3D12GraphicsCommandList* commandList,
         const std::wstring& objPath);
 
+    void LoadWater(
+        ID3D12Device* device,
+        ID3D12GraphicsCommandList* commandList);
+
     void LoadSkybox(
         ID3D12Device* device,
         ID3D12GraphicsCommandList* commandList,
@@ -70,6 +74,10 @@ public:
     bool IsOctreeCullingEnabled() const { return m_octreeCullingEnabled; }
     UINT GetOctreeNodeCount() const { return m_octree.GetNodeCount(); }
 
+    void ToggleFrustumLock();
+    bool IsFrustumLockEnabled() const { return m_frustumLockEnabled; }
+    UINT GetLockedRockCount() const { return static_cast<UINT>(m_lockedVisibleRocks.size()); }
+
     void ToggleShadows() { m_shadowsEnabled = !m_shadowsEnabled; }
     bool AreShadowsEnabled() const { return m_shadowsEnabled; }
 
@@ -86,6 +94,12 @@ public:
     void TogglePbr() { m_pbrEnabled = !m_pbrEnabled; }
     bool IsPbrEnabled() const { return m_pbrEnabled; }
 
+    // Lab 2 bonus: fire a point light along the camera look ray (screen center).
+    void ShootLight(DirectX::XMFLOAT3 origin, DirectX::XMFLOAT3 direction);
+    void UpdateShotLights(float deltaSeconds);
+    void ClearShotLights();
+    UINT GetShotLightCount() const { return static_cast<UINT>(m_flyingLights.size()); }
+
     bool HasModel() const { return m_model.IsValid(); }
     DirectX::XMFLOAT3 GetModelBoundsMin() const { return m_model.GetBoundsMin(); }
     DirectX::XMFLOAT3 GetModelBoundsMax() const { return m_model.GetBoundsMax(); }
@@ -100,14 +114,22 @@ public:
 private:
     struct GeometryCB {
         DirectX::XMFLOAT4X4 worldViewProj;
+        float timeSeconds = 0.0f;
+        float pad0 = 0.0f;
+        float pad1 = 0.0f;
+        float pad2 = 0.0f;
     };
 
     struct ShadowCB {
         DirectX::XMFLOAT4X4 worldLightViewProj;
         float alphaTestEnable = 0.0f;
         float alphaTestCutoff = 0.2f;
+        float vertexAnimEnable = 0.0f;
+        float vertexAnimPivotY = 0.0f;
+        float vertexAnimTime = 0.0f;
+        float vertexAnimAmp = 0.0f;
+        float vertexAnimSpeed = 0.0f;
         float pad0 = 0.0f;
-        float pad1 = 0.0f;
     };
 
     struct RockObjectCB {
@@ -151,8 +173,36 @@ private:
         Aabb worldBounds{};
     };
 
+    struct WaterCB {
+        DirectX::XMFLOAT4X4 world;
+        DirectX::XMFLOAT4X4 worldInvTranspose;
+        DirectX::XMFLOAT4X4 worldViewProj;
+        DirectX::XMFLOAT3 eyePosW;
+        float time = 0.0f;
+        float minTess = 6.0f;
+        float maxTess = 24.0f;
+        float tessNear = 80.0f;
+        float tessFar = 900.0f;
+        float waveAmp = 2.4f;
+        float waveFreq = 0.085f;
+        float waveSpeed = 1.6f;
+        float pad = 0.0f;
+    };
+
+    struct FlyingLight {
+        DirectX::XMFLOAT3 position{};
+        DirectX::XMFLOAT3 velocity{};
+        DirectX::XMFLOAT3 color{1.0f, 1.0f, 1.0f};
+        float intensity = 36.0f;
+        float range = 550.0f;
+        float age = 0.0f;
+    };
+
+    void ComposeLights();
+
     void CreateGeometryPipeline(ID3D12Device* device);
     void CreateRockTessPipeline(ID3D12Device* device);
+    void CreateWaterTessPipeline(ID3D12Device* device);
     void CreateShadowPipeline(ID3D12Device* device);
     void CreateLightingPipeline(ID3D12Device* device);
     void CreateConstantBuffers(ID3D12Device* device);
@@ -161,7 +211,12 @@ private:
     void BuildRockInstances();
     void BuildRockOctree();
     void CollectVisibleRocks(std::vector<uint32_t>& outVisible);
-    void RenderShadowMaps(ID3D12GraphicsCommandList* commandList, const Camera& camera, float aspect);
+    void QueryFrustumVisibleRocks(std::vector<uint32_t>& outVisible) const;
+    void RenderShadowMaps(
+        ID3D12GraphicsCommandList* commandList,
+        const Camera& camera,
+        float aspect,
+        float timeSeconds);
     DirectX::XMFLOAT3 FindDirectionalLightDirection() const;
 
     GeometryCB* GeometryCbForFrame();
@@ -171,7 +226,9 @@ private:
     uint8_t* RockCbBytesBaseForFrame();
     uint8_t* ShadowCbBytesBaseForFrame();
     D3D12_GPU_VIRTUAL_ADDRESS RockCbGpu(UINT slotInFrame);
+    D3D12_GPU_VIRTUAL_ADDRESS WaterCbGpu();
     D3D12_GPU_VIRTUAL_ADDRESS ShadowCbGpu(UINT slotInFrame);
+    WaterCB* WaterCbForFrame();
 
     GBuffer m_gbuffer;
     CascadedShadowMaps m_shadowMaps;
@@ -179,6 +236,8 @@ private:
     PostProcess m_post;
     Model m_model;
     Model m_rockModel;
+    Model m_waterModel;
+    DirectX::XMFLOAT4X4 m_waterWorld{};
     std::vector<GpuLight> m_lights;
     std::vector<RockInstance> m_rockInstances;
     std::vector<OctreeItem> m_octreeItems;
@@ -192,6 +251,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_geometryPso;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rockRootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_rockTessPso;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_waterRootSignature;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_waterTessPso;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_shadowRootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_shadowPso;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_shadowAlphaPso;
@@ -199,6 +260,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_lightingPso;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_geometryCb;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_rockCb;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_waterCb;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_lightingCb;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_shadowCb;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_skybox;
@@ -206,12 +268,14 @@ private:
 
     uint8_t* m_mappedGeometryCbBytes = nullptr;
     uint8_t* m_mappedRockCbBytes = nullptr;
+    uint8_t* m_mappedWaterCbBytes = nullptr;
     uint8_t* m_mappedLightingCbBytes = nullptr;
     uint8_t* m_mappedShadowCbBytes = nullptr;
 
     UINT m_geometryCbStride = 256;
     UINT m_lightingCbStride = 256;
     UINT m_rockCbStride = 256;
+    UINT m_waterCbStride = 256;
     UINT m_shadowCbStride = 256;
     UINT m_rockSlotsPerFrame = 0;
     UINT m_shadowSlotsPerFrame = 0;
@@ -224,6 +288,10 @@ private:
     UINT m_rocksDrawnLastFrame = 0;
     bool m_frustumCullingEnabled = true;
     bool m_octreeCullingEnabled = false;
+    bool m_frustumLockEnabled = false;
+    bool m_pendingFrustumLock = false;
+    std::vector<uint32_t> m_lockedVisibleRocks;
+    std::vector<uint8_t> m_lockedRockMask;
     bool m_shadowsEnabled = true;
     bool m_pbrEnabled = true;
     bool m_skyboxLoaded = false;
@@ -234,4 +302,8 @@ private:
     float m_rockTessNear = 40.0f;
     float m_rockTessFar = 220.0f;
     float m_cascadeLambda = 0.75f;
+    float m_flowerbedPivotY = 0.0f;
+    UINT m_sceneLightCount = 0;
+    UINT m_shotColorIndex = 0;
+    std::vector<FlyingLight> m_flyingLights;
 };
